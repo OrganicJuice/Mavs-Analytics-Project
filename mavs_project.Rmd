@@ -1,0 +1,221 @@
+---
+title: "Mavs intern project"
+author: "Howard Ding"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+
+library(DBI)
+library(RMySQL)
+
+host <- "mavs-basketball.clqxukzyz377.us-east-1.rds.amazonaws.com"
+dbname <- "analytics_intern"
+user <- "Intern"
+password <- "Basketball41!"
+port <- 3306
+
+con <- dbConnect(
+  RMySQL::MySQL(),
+  host = host,
+  dbname = dbname,
+  user = user,
+  password = password,
+  port = port
+)
+
+#examine the whole event_pbp_test table
+dbGetQuery(con, "SELECT MIN(date) AS first_game, MAX(date) AS last_game FROM event_pbp_test")
+
+event_pbp_test <- dbGetQuery(con, "SELECT * FROM event_pbp_test")
+
+
+# Query to get data from event_pbp_test table
+pbp_data <- dbGetQuery(con, "SELECT * FROM event_pbp_test")
+head(pbp_data)
+
+# Query to get data from nba_players_test table
+players_data <- dbGetQuery(con, "SELECT * FROM nba_players_test")
+head(players_data)
+
+# summary of play-by-play data
+summary(pbp_data)
+
+# summary of NBA players' data
+summary(players_data)
+
+
+```
+1. Total rebounds by player:
+```{r}
+#create a table called rebound which count playerId1 on msgType = 4 in pbp_data but separate count to offensive rebounds and defensive rebounds where pbp_data nbaTeamId = offTeamId means there is an offensive rebound and pbp_data nbaTeamId = defTeamId means there is a defensive rebound
+dbGetQuery(con, "SELECT playerId1, 
+           COUNT(msgType) AS count, 
+           SUM(CASE WHEN nbaTeamId = offTeamId THEN 1 ELSE 0 END) AS offensive_rebounds, 
+           SUM(CASE WHEN nbaTeamId = defTeamId THEN 1 ELSE 0 END) AS defensive_rebounds 
+           FROM event_pbp_test 
+           WHERE msgType = 4 GROUP BY playerId1 ORDER BY count DESC")
+
+#Join the previous query with the players_data table to get the player names with the playerId1 from pbp_data and nbaId, name from players_data
+rebound <- dbGetQuery(con, "SELECT a.playerId1, 
+           b.nbaId, 
+           b.name, 
+           a.count, 
+           a.offensive_rebounds, 
+           a.defensive_rebounds 
+           FROM (SELECT playerId1, 
+           COUNT(msgType) AS count, 
+           SUM(CASE WHEN nbaTeamId = offTeamId THEN 1 ELSE 0 END) AS offensive_rebounds, 
+           SUM(CASE WHEN nbaTeamId = defTeamId THEN 1 ELSE 0 END) AS defensive_rebounds 
+           FROM event_pbp_test 
+           WHERE msgType = 4 GROUP BY playerId1 ORDER BY count DESC) a 
+           JOIN nba_players_test b ON a.playerId1 = b.nbaId
+           GROUP BY a.playerId1 ORDER BY a.count DESC")
+
+#validating by basic r 
+rebound_validation <- pbp_data[pbp_data$msgType == 4,]
+rebound_validation$offensive_rebounds <- ifelse(rebound_validation$nbaTeamId == rebound_validation$offTeamId, 1, 0)
+rebound_validation$defensive_rebounds <- ifelse(rebound_validation$nbaTeamId == rebound_validation$defTeamId, 1, 0)
+reb_valid <- aggregate(cbind(
+                              count = rebound_validation$msgType,
+                              offensive_rebounds = rebound_validation$offensive_rebounds,
+                              defensive_rebounds = rebound_validation$defensive_rebounds),
+                       by = list(rebound_validation$playerId1),
+                       FUN = sum)
+
+players_idname <- players_data[,c("nbaId", "name")]
+reb_valid <- merge(reb_valid, players_idname, by.x = "Group.1", by.y = "nbaId")
+reb_valid <- reb_valid[order(reb_valid$count, decreasing = T),]
+
+dbDisconnect(con)
+```
+
+a. top 10 defensive rebounders in the last four minutes of the second quarters of the games in the season. 
+```{r}
+#convert gameClock to time format use lubridate, test on event_pbp_test
+library(lubridate)
+
+event_pbp_test$gameClock <- ms(event_pbp_test$gameClock)
+less_4min <- event_pbp_test[event_pbp_test$period == 2 & event_pbp_test$gameClock <= dminutes(4),]
+def_rebound <- less_4min[less_4min$msgType == 4,]
+def_rebound$defensive_rebounds <- ifelse(def_rebound$nbaTeamId == def_rebound$defTeamId, 1, 0)
+def_rebound <- aggregate(cbind(
+                            count = def_rebound$msgType,
+                            defensive_rebounds = def_rebound$defensive_rebounds),
+                       by = list(playerId1 = def_rebound$playerId1),
+                       FUN = sum)
+
+#real operation
+pbp_data$gameClock <- ms(pbp_data$gameClock)
+sec_quar_4min <- pbp_data[pbp_data$period == 2 & pbp_data$gameClock <= dminutes(4),]
+def_reb <- sec_quar_4min[sec_quar_4min$msgType == 4,]
+def_reb$defensive_rebounds <- ifelse(def_reb$nbaTeamId == def_reb$defTeamId, 1, 0)
+def_reb <- aggregate(cbind(
+                            count = def_reb$msgType,
+                            defensive_rebounds = def_reb$defensive_rebounds),
+                       by = list(playerId1 = def_reb$playerId1),
+                       FUN = sum)
+players_idname <- players_data[,c("nbaId", "name")]
+sec_4min_def_reb <- merge(def_reb, players_idname, by.x = "playerId1", by.y = "nbaId")
+sec_4min_def_reb <- sec_4min_def_reb[order(sec_4min_def_reb$count, decreasing = T),]
+print(sec_4min_def_reb[1:10,c("name", "defensive_rebounds")])
+
+
+#validation
+
+jokic <- pbp_data[pbp_data$period == 2 & pbp_data$gameClock <= dminutes(4) & pbp_data$playerId1 == 203999,]
+jokic <- jokic[jokic$msgType == 4,]
+jokic$defensive_rebounds <- ifelse(jokic$nbaTeamId == jokic$defTeamId, 1, 0)
+jokic_def_reb_count <- sum(jokic$defensive_rebounds, na.rm = T)
+jokic_def_reb_count
+```
+b. top 5 oreb players in first half from two random draft class 
+```{r}
+#first half oreb 
+first_half <- pbp_data[pbp_data$period == 1 | pbp_data$period == 2,]
+first_hlaf_oreb <- first_half[first_half$msgType == 4,]
+first_hlaf_oreb$offensive_rebounds <- ifelse(first_hlaf_oreb$nbaTeamId == first_hlaf_oreb$offTeamId, 1, 0)
+first_half_oreb <- aggregate(cbind(
+                                       count = first_hlaf_oreb$msgType,
+                                       offensive_rebounds = first_hlaf_oreb$offensive_rebounds),
+                                     by = list(playerId1 = first_hlaf_oreb$playerId1),
+                                     FUN = sum)
+players_idname <- players_data[,c("nbaId", "name", "draftYear")]
+first_half_oreb <- merge(first_half_oreb, players_idname, by.x = "playerId1", by.y = "nbaId")
+
+#Luka draft class 2018
+luka_first_half_oreb <- first_half_oreb[first_half_oreb$draftYear == 2018,]
+luka_first_half_oreb <- luka_first_half_oreb[order(luka_first_half_oreb$offensive_rebounds, decreasing = T),]
+luka_first_half_oreb <- luka_first_half_oreb[1:5,c("name", "offensive_rebounds")]
+
+#Lamelo draft class 2020
+lamelo_first_half_oreb <- first_half_oreb[first_half_oreb$draftYear == 2020,]
+lamelo_first_half_oreb <- lamelo_first_half_oreb[order(lamelo_first_half_oreb$offensive_rebounds, decreasing = T),]
+lamelo_first_half_oreb <- lamelo_first_half_oreb[1:5,c("name", "offensive_rebounds")]
+
+
+```
+
+
+2. find the game with the largest margin of victory for each team  
+```{r}
+pbp_data$game_prefix <- sub("_\\d+$", "", pbp_data$id)  
+pbp_data$play_number <- as.numeric(sub(".*_", "", pbp_data$id))  
+
+
+library(dplyr)
+
+max_play_by_game <- pbp_data %>%
+  group_by(game_prefix) %>%
+  filter(play_number == max(play_number)) %>%
+  ungroup()
+
+
+#count unique gameId to check if the number of unique gameId is the same as the number of games
+unique_gameId <- length(unique(pbp_data$gameId))
+
+
+library(lubridate)
+max_play_by_game$wallClock <- ymd_hms(max_play_by_game$wallClock)
+max_play_by_game <- max_play_by_game[order(max_play_by_game$wallClock, decreasing = T), ]
+
+max_play_by_game$away_team <- sapply(strsplit(max_play_by_game$game_prefix, "-"), function(x) x[4]) 
+max_play_by_game$home_team <- sapply(strsplit(max_play_by_game$game_prefix, "-"), function(x) x[5])  
+
+
+max_play_by_game$winner_team <- ifelse(max_play_by_game$homeScore > max_play_by_game$awayScore, max_play_by_game$home_team, max_play_by_game$away_team)
+
+max_play_by_game$Margin_of_Victory <- abs(max_play_by_game$homeScore - max_play_by_game$awayScore)
+
+head(max_play_by_game[, c("game_prefix", "home_team", "away_team", "homeScore", "awayScore", "winner_team")])
+
+largest_margin <- max_play_by_game %>%
+  group_by(winner_team) %>%
+  filter(Margin_of_Victory == max(Margin_of_Victory)) %>%
+  slice(1) %>% 
+  ungroup()
+
+LMV_final <- largest_margin %>% 
+  select(
+    team = winner_team,
+    nbaGameId,
+    gameId,
+    Margin_of_Victory
+  )
+
+print(LMV_final)
+```
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
